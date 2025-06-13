@@ -1,0 +1,192 @@
+﻿using DesafioSr.Storage;
+using DesafioSr.ViewModels;
+using Microsoft.AspNetCore.Mvc;
+using System.Diagnostics;
+using System.Text.Json;
+using System.Threading.Tasks;
+
+namespace DesafioSr.Controllers;
+
+[Route("api/users")]
+public class UsersController(MemoryStorage memoryStorage) : Controller
+{
+    private readonly Stopwatch _stopwatch = new();
+    private readonly MemoryStorage _memoryStorage = memoryStorage ?? throw new ArgumentNullException(nameof(memoryStorage));
+
+    [HttpPost]
+    [DisableRequestSizeLimit, RequestFormLimits(MultipartBodyLengthLimit = int.MaxValue, ValueLengthLimit = int.MaxValue)]
+    public async Task<IActionResult> PostUsersAsync()
+    {
+        _stopwatch.Start();
+
+        try
+        {
+            var file = Request.Form.Files.FirstOrDefault();
+            if (file.Length == 0)
+                return BadRequest(ResponseViewModel.CreateError("File is empty.", _stopwatch.Elapsed));
+
+            if (!file.FileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                return BadRequest(ResponseViewModel.CreateError("Invalid file format. Only JSON files are accepted.", _stopwatch.Elapsed));
+
+            await _memoryStorage.LoadFromFileAsync(file);
+
+            var totalUsers = _memoryStorage.Size;
+
+            _stopwatch.Stop();
+            return Ok(ResponseViewModel.Create(new { total_users = totalUsers }, _stopwatch.Elapsed, "File processed successfully."));
+        }
+        catch (Exception ex)
+        {
+            _stopwatch.Stop();
+            return BadRequest(ResponseViewModel.CreateError(ex.Message, _stopwatch.Elapsed));
+        }
+    }
+
+    [HttpGet("superusers")]
+    public IActionResult GetSuperUsers([FromServices] MemoryStorage memoryStorage)
+    {
+        _stopwatch.Start();
+        try
+        {
+            var users = memoryStorage.Users
+                .Where(u => u.Score >= 900 && u.Active);
+
+            _stopwatch.Stop();
+            return Ok(ResponseViewModel.Create(users, _stopwatch.Elapsed));
+        }
+        catch (Exception ex)
+        {
+            _stopwatch.Stop();
+            return BadRequest(ResponseViewModel.CreateError(ex.Message, _stopwatch.Elapsed));
+        }
+    }
+
+    [HttpGet("top-countries")]
+    public IActionResult GetTopCountries([FromServices] MemoryStorage memoryStorage)
+    {
+        _stopwatch.Start();
+        try
+        {
+            var topCountries = memoryStorage.Users
+                .GroupBy(u => u.Country)
+                .Select(g => new { country = g.Key, total_users = g.Count() })
+                .OrderByDescending(g => g.total_users)
+                .Take(5);
+
+            _stopwatch.Stop();
+            return Ok(ResponseViewModel.Create(topCountries, _stopwatch.Elapsed));
+        }
+        catch (Exception ex)
+        {
+            _stopwatch.Stop();
+            return BadRequest(ResponseViewModel.CreateError(ex.Message, _stopwatch.Elapsed));
+        }
+    }
+
+    [HttpGet("team-insights")]
+    public IActionResult GetTeamInsights([FromServices] MemoryStorage memoryStorage)
+    {
+        _stopwatch.Start();
+        try
+        {
+            var teamInsights = memoryStorage.Users
+                .GroupBy(u => u.Team!.Name)
+                .Select(g => new
+                {
+                    team = g.Key,
+                    total_users = g.Count(),
+                    average_score = g.Average(u => u.Score),
+                    active_users = g.Count(u => u.Active) * 100 / g.Count(),
+                    leaders = g.Count(u => u.Team!.Leader),
+                    completed_projects = g.Sum(u => u.Team!.Projects.Count(p => p.Completed))
+                })
+                .OrderByDescending(g => g.total_users)
+                .ToDictionary(g => g.team, g => new
+                {
+                    g.total_users,
+                    g.average_score,
+                    g.active_users
+                });
+            _stopwatch.Stop();
+            return Ok(ResponseViewModel.Create(teamInsights, _stopwatch.Elapsed));
+        }
+        catch (Exception ex)
+        {
+            _stopwatch.Stop();
+            return BadRequest(ResponseViewModel.CreateError(ex.Message, _stopwatch.Elapsed));
+        }
+    }
+
+    [HttpGet("active-users-per-day")]
+    public IActionResult GetActiveUsersPerDay([FromServices] MemoryStorage memoryStorage, [FromQuery(Name = "min")] int minLogins = 3000)
+    {
+        _stopwatch.Start();
+        try
+        {
+            var activeUsersPerDay = memoryStorage.Users
+                .SelectMany(u => u.Logs)
+                .GroupBy(log => log.Date)
+                .Select(g => new
+                {
+                    date = g.Key.ToString("yyyy-MM-dd"),
+                    total_users = g.Count()
+                })
+                .Where(g => g.total_users >= minLogins)
+                .OrderByDescending(g => g.total_users)
+                .ToList();
+
+            _stopwatch.Stop();
+            return Ok(ResponseViewModel.Create(activeUsersPerDay, _stopwatch.Elapsed));
+        }
+        catch (Exception ex)
+        {
+            _stopwatch.Stop();
+            return BadRequest(ResponseViewModel.CreateError(ex.Message, _stopwatch.Elapsed));
+        }
+    }
+
+    [HttpGet("evaluation")]
+    public async Task<IActionResult> GetEvaluation()
+    {
+        _stopwatch.Start();
+
+        var baseUri = Request.Scheme + "://" + Request.Host.Value + "/api/users/";
+        var evaluationResults = new List<object>();
+
+        var endpoints = new Dictionary<string, string>
+        {
+            { "GetSuperUsers", baseUri + "superusers" },
+            { "GetTopCountries", baseUri + "top-countries" },
+            { "GetTeamInsights", baseUri + "team-insights" },
+            { "GetActiveUsersPerDay", baseUri + "active-users-per-day?min=3000" }
+        };
+
+        try
+        {
+            var requests = endpoints.AsParallel().Select(async endpoint =>
+            {
+                var client = new HttpClient();
+                var response = await client.GetAsync(endpoint.Value);
+                var content = await response.Content.ReadAsStringAsync();
+                evaluationResults.Add(new
+                {
+                    endpoint = endpoint.Key,
+                    status = response.IsSuccessStatusCode,
+                    elapsedMilliseconds = response.Headers.Date.HasValue ? (DateTime.UtcNow - response.Headers.Date.Value).TotalMilliseconds : 0,
+                    content = JsonSerializer.Deserialize<object>(content),
+                });
+            }).ToArray();
+
+            await Task.WhenAll(requests);
+
+            _stopwatch.Stop();
+
+            return Ok(ResponseViewModel.Create(evaluationResults, _stopwatch.Elapsed, "Evaluation completed successfully."));
+        }
+        catch (Exception ex)
+        {
+            _stopwatch.Stop();
+            return BadRequest(ResponseViewModel.CreateError(ex.Message, _stopwatch.Elapsed));
+        }
+    }
+}
