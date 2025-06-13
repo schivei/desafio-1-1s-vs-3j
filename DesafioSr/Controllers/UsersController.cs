@@ -1,4 +1,5 @@
-﻿using DesafioSr.Storage;
+﻿using DesafioSr.Entities;
+using DesafioSr.Storage;
 using DesafioSr.ViewModels;
 using Microsoft.AspNetCore.Mvc;
 using System.Diagnostics;
@@ -7,21 +8,19 @@ using System.Threading.Tasks;
 
 namespace DesafioSr.Controllers;
 
-[Route("api/users")]
 public class UsersController(MemoryStorage memoryStorage) : Controller
 {
     private readonly Stopwatch _stopwatch = new();
     private readonly MemoryStorage _memoryStorage = memoryStorage ?? throw new ArgumentNullException(nameof(memoryStorage));
 
-    [HttpPost]
+    [HttpPost("/users")]
     [DisableRequestSizeLimit, RequestFormLimits(MultipartBodyLengthLimit = int.MaxValue, ValueLengthLimit = int.MaxValue)]
-    public async Task<IActionResult> PostUsersAsync()
+    public async Task<IActionResult> PostUsersAsync([FromForm] IFormFile file)
     {
         _stopwatch.Start();
 
         try
         {
-            var file = Request.Form.Files.FirstOrDefault();
             if (file.Length == 0)
                 return BadRequest(ResponseViewModel.CreateError("File is empty.", _stopwatch.Elapsed));
 
@@ -42,14 +41,24 @@ public class UsersController(MemoryStorage memoryStorage) : Controller
         }
     }
 
-    [HttpGet("superusers")]
+    [HttpGet("/superusers")]
     public IActionResult GetSuperUsers([FromServices] MemoryStorage memoryStorage)
     {
         _stopwatch.Start();
         try
         {
             var users = memoryStorage.Users
-                .Where(u => u.Score >= 900 && u.Active);
+                .Where(u => u.Score >= 900 && u.Active)
+                .Select(u => new
+                {
+                    u.Id,
+                    u.Name,
+                    u.Active,
+                    u.Age,
+                    u.Score,
+                    u.Country,
+                    u.Team
+                });
 
             _stopwatch.Stop();
             return Ok(ResponseViewModel.Create(users, _stopwatch.Elapsed));
@@ -61,7 +70,7 @@ public class UsersController(MemoryStorage memoryStorage) : Controller
         }
     }
 
-    [HttpGet("top-countries")]
+    [HttpGet("/top-countries")]
     public IActionResult GetTopCountries([FromServices] MemoryStorage memoryStorage)
     {
         _stopwatch.Start();
@@ -83,29 +92,37 @@ public class UsersController(MemoryStorage memoryStorage) : Controller
         }
     }
 
-    [HttpGet("team-insights")]
+    [HttpGet("/team-insights")]
     public IActionResult GetTeamInsights([FromServices] MemoryStorage memoryStorage)
     {
         _stopwatch.Start();
         try
         {
+            var maxDate = memoryStorage.Users.SelectMany(u => u.Logs).Select(l => l.Date).OrderByDescending(d => d).FirstOrDefault();
+
             var teamInsights = memoryStorage.Users
                 .GroupBy(u => u.Team!.Name)
                 .Select(g => new
                 {
                     team = g.Key,
                     total_users = g.Count(),
-                    average_score = g.Average(u => u.Score),
-                    active_users = g.Count(u => u.Active) * 100 / g.Count(),
+                    average_score = g.Average(u => u.Score * 1m),
+                    active_users = g.Count(u => u.Active) * 1m / g.Count(),
                     leaders = g.Count(u => u.Team!.Leader),
-                    completed_projects = g.Sum(u => u.Team!.Projects.Count(p => p.Completed))
+                    completed_projects = g.Sum(u => u.Team!.Projects.Count(p => p.Completed)),
+                    engaged_users = g.Count(u => u.Active && u.Logs.Any(l => l.Action == ActionLevel.login && l.Date >= maxDate.AddDays(-30))) * 1m / g.Count()
                 })
-                .OrderByDescending(g => g.total_users)
+                .OrderByDescending(g => g.engaged_users)
+                .ThenByDescending(g => g.active_users)
+                .ThenByDescending(g => g.total_users)
                 .ToDictionary(g => g.team, g => new
                 {
                     g.total_users,
                     g.average_score,
-                    g.active_users
+                    g.active_users,
+                    g.leaders,
+                    g.completed_projects,
+                    g.engaged_users
                 });
             _stopwatch.Stop();
             return Ok(ResponseViewModel.Create(teamInsights, _stopwatch.Elapsed));
@@ -117,8 +134,8 @@ public class UsersController(MemoryStorage memoryStorage) : Controller
         }
     }
 
-    [HttpGet("active-users-per-day")]
-    public IActionResult GetActiveUsersPerDay([FromServices] MemoryStorage memoryStorage, [FromQuery(Name = "min")] int minLogins = 3000)
+    [HttpGet("/active-users-per-day")]
+    public IActionResult GetActiveUsersPerDay([FromServices] MemoryStorage memoryStorage, [FromQuery] int min = 3000)
     {
         _stopwatch.Start();
         try
@@ -129,9 +146,9 @@ public class UsersController(MemoryStorage memoryStorage) : Controller
                 .Select(g => new
                 {
                     date = g.Key.ToString("yyyy-MM-dd"),
-                    total_users = g.Count()
+                    total_users = g.Count(l => l.Action == ActionLevel.login)
                 })
-                .Where(g => g.total_users >= minLogins)
+                .Where(g => g.total_users >= min)
                 .OrderByDescending(g => g.total_users)
                 .ToList();
 
@@ -145,12 +162,12 @@ public class UsersController(MemoryStorage memoryStorage) : Controller
         }
     }
 
-    [HttpGet("evaluation")]
+    [HttpGet("/evaluation")]
     public async Task<IActionResult> GetEvaluation()
     {
         _stopwatch.Start();
 
-        var baseUri = Request.Scheme + "://" + Request.Host.Value + "/api/users/";
+        var baseUri = Request.Scheme + "://" + Request.Host.Value + "/";
         var evaluationResults = new List<object>();
 
         var endpoints = new Dictionary<string, string>

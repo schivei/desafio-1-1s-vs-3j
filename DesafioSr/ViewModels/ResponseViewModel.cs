@@ -8,7 +8,7 @@ public readonly struct ResponseViewModel()
     public object? Data { get; init; }
 
     [JsonPropertyName("elapsed")]
-    public required TimeSpan Elapsed { get; init; }
+    public required double Elapsed { get; init; }
 
     [JsonPropertyName("timestamp")]
     public DateTimeOffset Timestamp { get; init; } = DateTimeOffset.UtcNow;
@@ -24,7 +24,7 @@ public readonly struct ResponseViewModel()
         return new ResponseViewModel
         {
             Data = data,
-            Elapsed = elapsed,
+            Elapsed = elapsed.TotalMilliseconds,
             Message = message
         };
     }
@@ -35,7 +35,7 @@ public readonly struct ResponseViewModel()
         {
             Success = false,
             Message = message,
-            Elapsed = elapsed
+            Elapsed = elapsed.TotalMilliseconds
         };
     }
 }
